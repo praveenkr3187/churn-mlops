@@ -1,7 +1,7 @@
 module "eks" {
   # checkov:skip=CKV_TF_1:Registry modules pinned by version constraint + .terraform.lock.hcl
   source  = "terraform-aws-modules/eks/aws"
-  version = "~> 20.37"
+  version = "~> 21.26"
 
   cluster_name    = local.name
   cluster_version = var.kubernetes_version
