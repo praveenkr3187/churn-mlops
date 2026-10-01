@@ -105,7 +105,7 @@ resource "aws_eks_pod_identity_association" "workload" {
 module "lbc_pod_identity" {
   # checkov:skip=CKV_TF_1:Registry modules pinned by version constraint + .terraform.lock.hcl
   source  = "terraform-aws-modules/eks-pod-identity/aws"
-  version = "~> 1.12"
+  version = "~> 2.9"
 
   name                            = "${local.name}-aws-lbc"
   attach_aws_lb_controller_policy = true
