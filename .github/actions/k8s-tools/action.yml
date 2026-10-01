@@ -1,0 +1,15 @@
+name: k8s-tools
+description: Install kustomize and the Python bits the release scripts need (kubectl is preinstalled)
+inputs:
+  kustomize-version: { required: false, default: "5.7.1" }
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with: { python-version: "3.11" }
+    - shell: bash
+      run: |
+        pip install -q pyyaml
+        curl -sSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${{ inputs.kustomize-version }}/kustomize_v${{ inputs.kustomize-version }}_linux_amd64.tar.gz" \
+          | sudo tar xz -C /usr/local/bin kustomize
+        kubectl version --client

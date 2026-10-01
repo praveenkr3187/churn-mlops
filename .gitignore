@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+models/
+reports/
+logs/
+data/*.csv
+rendered/
+image-*.tar
+sbom-*.json
+.terraform/
+*.tfstate*
+tfplan
+.env

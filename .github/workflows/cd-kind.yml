@@ -1,0 +1,103 @@
+# CD rehearsal on a throwaway Kubernetes cluster (kind) inside the GitHub
+# runner. No cloud account, no secrets, no cost — so anyone learning this repo
+# can watch continuous DELIVERY actually happen, not just read release.yml.
+#
+# It runs the same commands the real pipelines run (scripts/release.py +
+# scripts/deploy.sh + scripts/smoke_test.sh), in three drills:
+#   1. first deploy   : apply the app layer, bootstrap a model, smoke test
+#   2. good release   : new image tag -> rolling update -> smoke test
+#   3. bad release    : broken image tag -> rollout FAILS -> automatic rollback
+#
+# What it can't show (needs a real cluster with Gateway + Prometheus): weighted
+# canary traffic and canary analysis. Those are covered by tests/test_release.py
+# and by release.yml / model-release.yml.
+name: cd-kind
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ["src/**", "scripts/**", "k8s/**", "Dockerfile", "requirements.lock", ".github/workflows/cd-kind.yml"]
+  push:
+    branches: [main]
+    paths: ["src/**", "scripts/**", "k8s/**", "Dockerfile", "requirements.lock", ".github/workflows/cd-kind.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cd-kind-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  OVERLAY: local
+  NS: churn-local
+  SMOKE_API_KEY: dev-key          # the local overlay's dev key, not a real secret
+
+jobs:
+  rehearse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/k8s-tools      # python + pyyaml + kustomize
+      - uses: helm/kind-action@v1
+        with: { cluster_name: churn }
+
+      - name: Build images once (same Dockerfile as release.yml)
+        run: |
+          docker build --target serve -t churn-api:dev .
+          docker build --target train -t churn-train:dev .
+          kind load docker-image churn-api:dev churn-train:dev --name churn
+
+      # ---------------------------------------------------------- drill 1 --
+      - name: "Drill 1: first deploy (app layer + bootstrap model)"
+        run: |
+          kubectl apply -k "k8s/overlays/$OVERLAY"
+          kubectl -n "$NS" wait --for=condition=complete job/churn-bootstrap --timeout=600s
+          kubectl -n "$NS" logs job/churn-bootstrap | tail -30     # the training gates
+          # The API only loads a model at startup; restart now that one exists.
+          kubectl -n "$NS" rollout restart deploy/churn-api
+          scripts/deploy.sh "$OVERLAY"
+          echo "### Drill 1: first deploy ✅" >> "$GITHUB_STEP_SUMMARY"
+
+      # ---------------------------------------------------------- drill 2 --
+      - name: "Drill 2: release a new version (rolling update)"
+        run: |
+          TAG="ci-${GITHUB_SHA::8}"
+          # In the cloud this is `crane push` to ECR / Artifact Registry.
+          docker tag churn-api:dev "churn-api:$TAG"
+          docker tag churn-train:dev "churn-train:$TAG"
+          kind load docker-image "churn-api:$TAG" "churn-train:$TAG" --name churn
+
+          python scripts/release.py set-stable --overlay "$OVERLAY" --tag "$TAG"
+          git diff -- "k8s/overlays/$OVERLAY/release/"     # the release, as a Git diff
+          scripts/deploy.sh "$OVERLAY"
+
+          kubectl -n "$NS" get deploy churn-api -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}' \
+            | grep -q "churn-api:$TAG" || { echo "::error::image was not updated"; exit 1; }
+          kubectl -n "$NS" rollout history deploy/churn-api
+          echo "### Drill 2: released \`$TAG\` ✅" >> "$GITHUB_STEP_SUMMARY"
+
+      # ---------------------------------------------------------- drill 3 --
+      - name: "Drill 3: bad release is caught and rolled back"
+        run: |
+          GOOD=$(python scripts/release.py show --overlay "$OVERLAY" | python -c "import json,sys;print(json.load(sys.stdin)['stable']['tag'])")
+          python scripts/release.py set-stable --overlay "$OVERLAY" --tag does-not-exist
+
+          # maxUnavailable: 0 keeps the old pods serving while the new ones fail.
+          if ROLLOUT_TIMEOUT=90s scripts/deploy.sh "$OVERLAY" --no-smoke; then
+            echo "::error::a broken release was reported healthy — the pipeline would not protect prod"; exit 1
+          fi
+          echo "Rollout failed as expected; rolling back to $GOOD"
+
+          # Same rollback the real pipeline does: restore the release state, re-apply.
+          python scripts/release.py set-stable --overlay "$OVERLAY" --tag "$GOOD"
+          scripts/deploy.sh "$OVERLAY"
+          echo "### Drill 3: broken release rejected, rolled back to \`$GOOD\` ✅" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          kubectl -n "$NS" get all,events --sort-by=.lastTimestamp || true
+          kubectl -n "$NS" describe deploy/churn-api || true
+          kubectl -n "$NS" logs deploy/churn-api --tail=100 || true

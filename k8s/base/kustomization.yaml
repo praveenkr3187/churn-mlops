@@ -1,0 +1,41 @@
+# Cloud- and environment-neutral base. Overlays add: namespace, image
+# registry + tag, model version, hostnames, cloud identity and secrets.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - serviceaccounts.yaml
+  - deployment.yaml
+  - service.yaml
+  - httproute.yaml
+  - traffic-policy.yaml
+  - hpa.yaml
+  - pdb.yaml
+  - networkpolicy.yaml
+  - externalsecret.yaml
+  - servicemonitor.yaml
+  - prometheusrule.yaml
+  - cronjob-retrain.yaml
+  - cronjob-batch-score.yaml
+
+commonLabels:
+  app.kubernetes.io/part-of: churn
+  app.kubernetes.io/managed-by: kustomize
+
+configMapGenerator:
+  # Environment-wide, non-secret settings (overlays merge in their values).
+  - name: churn-config
+    literals:
+      - CHURN_ENV=dev
+      - LOG_LEVEL=INFO
+      - CHURN_MODEL_REGISTRY=s3://CHANGE-ME/registry
+      - CHURN_DATA_PATH=s3://CHANGE-ME/customers.csv
+      - CHURN_SCORES_PATH=s3://CHANGE-ME/scores/latest.csv
+      - CHURN_MIN_ROC_AUC=0.75
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.observability:4318
+  # Which model version the stable track serves. The release pipeline edits
+  # this (scripts/release.py). Kustomize hashes the ConfigMap name, so a
+  # change here automatically triggers a rolling update.
+  - name: churn-stable-release
+    literals:
+      - CHURN_MODEL_VERSION=production

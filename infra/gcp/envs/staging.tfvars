@@ -1,0 +1,5 @@
+project_id        = "acme-churn-staging"
+environment       = "staging"
+region            = "asia-south1"
+name_prefix       = "acme"
+github_repository = "acme/churn-mlops"

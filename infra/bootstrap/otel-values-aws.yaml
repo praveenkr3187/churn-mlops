@@ -1,0 +1,20 @@
+mode: deployment
+image:
+  repository: otel/opentelemetry-collector-contrib
+serviceAccount:
+  name: otel-collector          # EKS Pod Identity grants X-Ray write (infra/aws/iam.tf)
+config:
+  receivers:
+    otlp:
+      protocols:
+        http: { endpoint: 0.0.0.0:4318 }
+  processors:
+    batch: {}
+  exporters:
+    awsxray: {}
+  service:
+    pipelines:
+      traces:
+        receivers: [otlp]
+        processors: [batch]
+        exporters: [awsxray]

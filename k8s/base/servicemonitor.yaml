@@ -1,0 +1,21 @@
+# Prometheus Operator (kube-prometheus-stack) discovers pods via this.
+# Works with Amazon Managed Prometheus (via the collector) and Google Managed
+# Prometheus (which also understands this CRD-style config via PodMonitoring).
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: churn-api
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: churn-api
+  podTargetLabels: ["track"]        # lets queries compare stable vs canary
+  podMetricsEndpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      relabelings:
+        - targetLabel: job
+          replacement: churn-api

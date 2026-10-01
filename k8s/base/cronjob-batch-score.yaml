@@ -1,0 +1,54 @@
+# Batch inference: the SAME model and code as the API, scoring the whole
+# customer base nightly and writing results to object storage for the CRM.
+# Many ML use cases only need this — no always-on API at all.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: churn-batch-score
+  labels:
+    app.kubernetes.io/name: churn-batch-score
+    app.kubernetes.io/component: job
+spec:
+  schedule: "30 21 * * *"          # daily 21:30 UTC (03:00 IST)
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 3600
+      ttlSecondsAfterFinished: 604800
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: churn-batch-score
+            app.kubernetes.io/component: job
+        spec:
+          serviceAccountName: churn-batch
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: score
+              image: churn-train           # has the same package + model loader
+              command: ["python", "-m", "churn.predict"]
+              args: ["$(CHURN_DATA_PATH)", "--out", "$(CHURN_SCORES_PATH)", "--version", "$(CHURN_MODEL_VERSION)"]
+              envFrom:
+                - configMapRef: { name: churn-config }
+                - configMapRef: { name: churn-stable-release }
+              resources:
+                requests: { cpu: 500m, memory: 1Gi }
+                limits: { memory: 2Gi }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+              volumeMounts:
+                - { name: tmp, mountPath: /tmp }
+          volumes:
+            - name: tmp
+              emptyDir: { sizeLimit: 1Gi }

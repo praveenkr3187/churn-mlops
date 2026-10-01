@@ -1,0 +1,8 @@
+# Who must review what (enable "Require review from Code Owners" in branch
+# protection). Replace the placeholder teams with real users/teams.
+*                       @acme/ml-engineers
+/infra/                 @acme/platform
+/k8s/                   @acme/platform
+/.github/               @acme/platform
+/src/churn/registry.py  @acme/ml-engineers @acme/platform
+/docs/SECURITY.md       @acme/security

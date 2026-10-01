@@ -1,0 +1,131 @@
+# Model release: ship a NEW MODEL with the SAME code. Triggered by a human
+# after the weekly retrain CronJob registers a candidate under 'staging'.
+#
+#   gh workflow run model-release -f version=staging     # whatever retraining produced
+#   gh workflow run model-release -f version=v20261004-203012
+#
+# Flow: show the model card for review -> approval (GitHub environment)
+#   -> canary 10% -> analysis -> canary 50% -> analysis -> promote
+#   -> move the registry's `production` alias (audit trail).
+name: model-release
+
+# checkov:skip=CKV_GHA_7:The input selects which already-built, gated model to release; nothing is built from it
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Model version, or 'staging' for the latest retrained candidate"
+        required: true
+        default: staging
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    environment: prod-review   # same cloud vars as prod, no approval gate; this job only reads
+    permissions: { contents: read, id-token: write }
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/cloud-auth
+        with:
+          cloud: ${{ vars.CLOUD }}
+          aws-region: ${{ vars.AWS_REGION }}
+          aws-role-arn: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          eks-cluster: ${{ vars.EKS_CLUSTER }}
+          gcp-wif-provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          gcp-service-account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          gcp-region: ${{ vars.GCP_REGION }}
+          gke-cluster: ${{ vars.GKE_CLUSTER }}
+          gcp-project: ${{ vars.GCP_PROJECT }}
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install --require-hashes --no-deps -r requirements.lock && pip install --no-deps .
+      - id: resolve
+        name: Resolve version and verify gates
+        env:
+          CHURN_MODEL_REGISTRY: ${{ vars.MODEL_REGISTRY_URI }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          python - <<'PY'
+          import os, sys
+          from churn import registry
+          v = registry.resolve(os.environ["INPUT_VERSION"])
+          md = registry.get_metadata(v)
+          failed = [g["name"] for g in md["gates"] if not g["passed"]]
+          if failed:
+              sys.exit(f"{v} failed gates: {failed}")
+          prod = registry.current("production")
+          print(f"candidate {v} vs production {prod}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"version={v}\n")
+          PY
+      - name: Put the model card in the run summary (what the approver reviews)
+        env:
+          CHURN_MODEL_REGISTRY: ${{ vars.MODEL_REGISTRY_URI }}
+          V: ${{ steps.resolve.outputs.version }}
+        run: |
+          python -c "import fsspec,os; from churn import config; \
+          print(fsspec.open(f\"{config.MODEL_REGISTRY}/versions/{os.environ['V']}/model_card.md\").open().read())" \
+          >> "$GITHUB_STEP_SUMMARY"
+
+  canary:
+    needs: review
+    runs-on: ubuntu-latest
+    environment: prod                  # <- required reviewers approve the model card
+    permissions: { contents: write, id-token: write }
+    env:
+      V: ${{ needs.review.outputs.version }}
+      SMOKE_API_KEY: ${{ secrets.SMOKE_API_KEY }}
+      CHURN_MODEL_REGISTRY: ${{ vars.MODEL_REGISTRY_URI }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main }
+      - uses: ./.github/actions/cloud-auth
+        with:
+          cloud: ${{ vars.CLOUD }}
+          aws-region: ${{ vars.AWS_REGION }}
+          aws-role-arn: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          eks-cluster: ${{ vars.EKS_CLUSTER }}
+          gcp-wif-provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          gcp-service-account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          gcp-region: ${{ vars.GCP_REGION }}
+          gke-cluster: ${{ vars.GKE_CLUSTER }}
+          gcp-project: ${{ vars.GCP_PROJECT }}
+      - uses: ./.github/actions/k8s-tools
+      - run: pip install --require-hashes --no-deps -r requirements.lock && pip install --no-deps .
+
+      - name: Canary 10% (same image, new model)
+        run: |
+          python scripts/release.py canary-start --overlay "${{ vars.OVERLAY }}" --model "$V" --weight 10
+          scripts/deploy.sh "${{ vars.OVERLAY }}"
+      - uses: ./.github/actions/canary-gate
+        with: { overlay: "${{ vars.OVERLAY }}", minutes: "15" }
+      - name: Canary 50%
+        run: |
+          python scripts/release.py canary-weight --overlay "${{ vars.OVERLAY }}" --weight 50
+          scripts/deploy.sh "${{ vars.OVERLAY }}" --no-smoke
+      - uses: ./.github/actions/canary-gate
+        with: { overlay: "${{ vars.OVERLAY }}", minutes: "15" }
+      - name: Promote
+        run: |
+          python scripts/release.py canary-promote --overlay "${{ vars.OVERLAY }}"
+          scripts/deploy.sh "${{ vars.OVERLAY }}"
+          python -m churn.promote "$V" --alias production \
+            --reason "model-release run ${{ github.run_id }} approved by ${{ github.actor }}"
+      - name: Roll back on failure
+        if: failure()
+        run: |
+          python scripts/release.py canary-abort --overlay "${{ vars.OVERLAY }}"
+          scripts/deploy.sh "${{ vars.OVERLAY }}" --no-smoke
+      - uses: ./.github/actions/commit-release
+        if: always()
+        with:
+          message: "model-release(${{ vars.OVERLAY }}): ${{ job.status == 'success' && 'promoted' || 'rolled back' }} ${{ needs.review.outputs.version }}"

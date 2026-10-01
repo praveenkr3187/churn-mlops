@@ -1,0 +1,34 @@
+# Envoy Gateway policy: rate limiting, retries and circuit breaking at the
+# edge, so a misbehaving client can't take the service down.
+# (On a managed load balancer you'd add AWS WAF / Cloud Armor in front too.)
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: churn-api
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: churn-api
+  rateLimit:
+    type: Local
+    local:
+      rules:
+        # Per API key: 50 requests/second.
+        - clientSelectors:
+            - headers:
+                - name: x-api-key
+                  type: Distinct
+          limit:
+            requests: 50
+            unit: Second
+  retry:
+    numRetries: 2
+    retryOn:
+      triggers: ["connect-failure", "reset", "retriable-status-codes"]
+      httpStatusCodes: [503]
+    perRetry:
+      timeout: 2s
+  circuitBreaker:
+    maxConnections: 1024
+    maxPendingRequests: 256

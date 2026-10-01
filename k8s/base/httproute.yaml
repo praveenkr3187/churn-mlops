@@ -1,0 +1,27 @@
+# Gateway API route (replaces Ingress). Attaches to the shared Gateway that
+# the platform team runs (k8s/platform/gateway.yaml).
+#
+# Only /v1/* is exposed publicly. /metrics, /health and /ready stay
+# cluster-internal (probes and Prometheus reach pods directly).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: churn-api
+  labels:
+    app.kubernetes.io/name: churn-api
+spec:
+  parentRefs:
+    - name: public
+      namespace: gateway-system
+      sectionName: https
+  hostnames:
+    - churn.example.com            # set per overlay
+  rules:
+    - matches:
+        - path: { type: PathPrefix, value: /v1/ }
+      timeouts:
+        request: 5s                # fail fast; clients retry with backoff
+      backendRefs:
+        - name: churn-api-stable
+          port: 80
+          weight: 100

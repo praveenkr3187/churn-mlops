@@ -1,0 +1,31 @@
+# aws-staging
+# Cloud: AWS (EKS, ECR, S3). Identity: EKS Pod Identity (infra/aws/iam.tf).
+# Everything cloud-specific in the app layer is in this file: bucket URIs,
+# hostname and (via ./release) the image registry. The rest is shared.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: churn-staging
+
+resources:
+  - namespace.yaml
+  - ../../base
+
+components:
+  - ./release
+
+configMapGenerator:
+  - name: churn-config
+    behavior: merge
+    literals:
+      - CHURN_ENV=staging
+      - CHURN_MODEL_REGISTRY=s3://acme-churn-staging-models/registry
+      - CHURN_DATA_PATH=s3://acme-churn-staging-data/customers.csv
+      - CHURN_SCORES_PATH=s3://acme-churn-staging-data/scores/latest.csv
+
+patches:
+  - target: { kind: HTTPRoute, name: churn-api }
+    patch: |-
+      - op: replace
+        path: /spec/hostnames
+        value: ["churn-staging.example.com"]

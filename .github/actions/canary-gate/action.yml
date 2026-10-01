@@ -1,0 +1,32 @@
+# Wait while the canary takes real traffic, then let scripts/canary_analysis.py
+# compare it with stable in Prometheus. Fails the job (-> automatic rollback)
+# if the canary is worse; keeps waiting while the result is inconclusive.
+name: canary-gate
+description: Automated canary analysis
+inputs:
+  overlay: { required: true }
+  minutes: { required: false, default: "10" }
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        OVERLAY: ${{ inputs.overlay }}
+        MINUTES: ${{ inputs.minutes }}
+      run: |
+        set -uo pipefail
+        NS="churn-${OVERLAY#*-}"
+        kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090 >/dev/null 2>&1 &
+        PF=$!; trap 'kill $PF 2>/dev/null' EXIT
+        echo "Letting the canary serve traffic for ${MINUTES}m..."
+        sleep $((MINUTES * 60))
+        for attempt in 1 2 3; do
+          python scripts/canary_analysis.py --prometheus http://localhost:9090 \
+            --namespace "$NS" --window "${MINUTES}m"
+          code=$?
+          [[ $code == 0 ]] && exit 0
+          [[ $code == 1 ]] && { echo "::error::Canary unhealthy — rolling back"; exit 1; }
+          echo "Inconclusive (not enough traffic yet); waiting 5 more minutes ($attempt/3)"
+          sleep 300
+        done
+        echo "::error::Canary never received enough traffic to judge"; exit 1

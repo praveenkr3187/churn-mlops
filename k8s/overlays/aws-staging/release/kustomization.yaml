@@ -1,0 +1,16 @@
+# MACHINE-MANAGED by scripts/release.py — do not edit by hand.
+# Records exactly what each track runs in this environment.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+images:
+- name: churn-api
+  newName: 123456789012.dkr.ecr.ap-south-1.amazonaws.com/churn-api
+  newTag: 0.0.0-bootstrap
+- name: churn-train
+  newName: 123456789012.dkr.ecr.ap-south-1.amazonaws.com/churn-train
+  newTag: 0.0.0-bootstrap
+configMapGenerator:
+- name: churn-stable-release
+  behavior: merge
+  literals:
+  - CHURN_MODEL_VERSION=production

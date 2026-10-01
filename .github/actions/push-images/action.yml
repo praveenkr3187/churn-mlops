@@ -1,0 +1,37 @@
+# Push the byte-identical OCI archives built once in the `build` job to this
+# environment's registry, then sign them (keyless Sigstore/cosign, identity =
+# this GitHub workflow) and attach the SBOM as a signed attestation.
+name: push-images
+description: Push, sign and attest the release images
+inputs:
+  registry: { required: true }
+  tag: { required: true }
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@v4
+      with: { name: images }
+    - uses: imjasonh/setup-crane@v0.4
+    - uses: sigstore/cosign-installer@v3
+    - shell: bash
+      env:
+        REG: ${{ inputs.registry }}
+        TAG: ${{ inputs.tag }}
+      run: |
+        set -euo pipefail
+        for pair in serve:churn-api train:churn-train; do
+          target=${pair%%:*}; repo=${pair##*:}
+          # Tags are immutable in ECR / Artifact Registry: re-pushing an existing
+          # tag fails, so check first (makes re-runs of a failed job safe).
+          if crane digest "$REG/$repo:$TAG" >/dev/null 2>&1; then
+            echo "$repo:$TAG already present"
+          else
+            crane push "image-$target.tar" "$REG/$repo:$TAG"
+          fi
+          digest=$(crane digest "$REG/$repo:$TAG")
+          cosign sign --yes "$REG/$repo@$digest"
+          if [[ "$target" == "serve" ]]; then
+            cosign attest --yes --type spdxjson --predicate sbom-serve.spdx.json "$REG/$repo@$digest"
+          fi
+          echo "### $repo:$TAG  \`$digest\`" >> "$GITHUB_STEP_SUMMARY"
+        done
