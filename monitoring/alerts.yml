@@ -1,0 +1,124 @@
+# Prometheus alerting rules — SINGLE SOURCE. Used as-is by docker-compose and
+# rendered into a Kubernetes PrometheusRule by `make k8s-alerts`
+# (CI fails if the two drift apart).
+#
+# SLOs (see docs/OPERATIONS.md):
+#   availability  99.5% of /v1/* requests are non-5xx over 30 days
+#   latency       p95 of /v1/predict < 250 ms
+#
+# Every alert has a `runbook` annotation that points to the exact section of
+# docs/OPERATIONS.md telling the on-call engineer what to do.
+groups:
+  - name: churn-api-slo
+    rules:
+      # Multi-window, multi-burn-rate alerts (Google SRE workbook, ch. 5).
+      # Error budget = 0.5%. 14.4x burn over 1h eats 2% of the monthly budget.
+      - record: churn:error_ratio:rate5m
+        expr: |
+          sum(rate(churn_http_requests_total{route=~"/v1/.*",status=~"5.."}[5m]))
+          / clamp_min(sum(rate(churn_http_requests_total{route=~"/v1/.*"}[5m])), 1e-9)
+      - record: churn:error_ratio:rate1h
+        expr: |
+          sum(rate(churn_http_requests_total{route=~"/v1/.*",status=~"5.."}[1h]))
+          / clamp_min(sum(rate(churn_http_requests_total{route=~"/v1/.*"}[1h])), 1e-9)
+      - record: churn:error_ratio:rate30m
+        expr: |
+          sum(rate(churn_http_requests_total{route=~"/v1/.*",status=~"5.."}[30m]))
+          / clamp_min(sum(rate(churn_http_requests_total{route=~"/v1/.*"}[30m])), 1e-9)
+      - record: churn:error_ratio:rate6h
+        expr: |
+          sum(rate(churn_http_requests_total{route=~"/v1/.*",status=~"5.."}[6h]))
+          / clamp_min(sum(rate(churn_http_requests_total{route=~"/v1/.*"}[6h])), 1e-9)
+
+      - alert: ChurnErrorBudgetFastBurn
+        expr: churn:error_ratio:rate1h > (14.4 * 0.005) and churn:error_ratio:rate5m > (14.4 * 0.005)
+        for: 2m
+        labels: { severity: page, team: ml-platform }
+        annotations:
+          summary: "churn-api burning error budget fast ({{ $value | humanizePercentage }} 5xx)"
+          runbook: "docs/OPERATIONS.md#high-error-rate"
+
+      - alert: ChurnErrorBudgetSlowBurn
+        expr: churn:error_ratio:rate6h > (6 * 0.005) and churn:error_ratio:rate30m > (6 * 0.005)
+        for: 15m
+        labels: { severity: ticket, team: ml-platform }
+        annotations:
+          summary: "churn-api error budget slow burn"
+          runbook: "docs/OPERATIONS.md#high-error-rate"
+
+      - alert: ChurnHighLatency
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(churn_http_request_duration_seconds_bucket{route="/v1/predict"}[5m]))) > 0.25
+        for: 10m
+        labels: { severity: page, team: ml-platform }
+        annotations:
+          summary: "p95 /v1/predict latency {{ $value | humanizeDuration }} > 250ms"
+          runbook: "docs/OPERATIONS.md#high-latency"
+
+  - name: churn-api-health
+    rules:
+      - alert: ChurnApiDown
+        expr: absent(up{job="churn-api"} == 1)
+        for: 2m
+        labels: { severity: page, team: ml-platform }
+        annotations:
+          summary: "No churn-api target is up"
+          runbook: "docs/OPERATIONS.md#api-down"
+
+      - alert: ChurnModelNotLoaded
+        expr: min(churn_model_loaded) == 0
+        for: 5m
+        labels: { severity: page, team: ml-platform }
+        annotations:
+          summary: "A churn-api pod is running without a model"
+          runbook: "docs/OPERATIONS.md#model-not-loaded"
+
+      - alert: ChurnMixedModelVersions
+        expr: count(count by (model_version) (churn_model_info)) > 1
+        for: 2h
+        labels: { severity: ticket, team: ml-platform }
+        annotations:
+          summary: "More than one model version serving for 2h (canary stuck?)"
+          runbook: "docs/OPERATIONS.md#canary"
+
+  - name: churn-model-quality
+    rules:
+      # Model-level signals: the API can be 100% healthy while the model is wrong.
+      - record: churn:score_mean:1h
+        expr: |
+          sum(rate(churn_prediction_score_sum[1h])) / clamp_min(sum(rate(churn_prediction_score_count[1h])), 1e-9)
+
+      - alert: ChurnScoreDistributionShift
+        expr: abs(churn:score_mean:1h - (churn:score_mean:1h offset 7d)) > 0.10
+        for: 1h
+        labels: { severity: ticket, team: data-science }
+        annotations:
+          summary: "Mean churn score moved {{ $value | humanize }} vs last week — check drift"
+          runbook: "docs/OPERATIONS.md#drift"
+
+      - alert: ChurnHighRiskShareSpike
+        expr: |
+          sum(rate(churn_predictions_total{risk_band="high"}[1h]))
+          / clamp_min(sum(rate(churn_predictions_total[1h])), 1e-9) > 0.5
+        for: 1h
+        labels: { severity: ticket, team: data-science }
+        annotations:
+          summary: "Over half of customers scored high-risk in the last hour"
+          runbook: "docs/OPERATIONS.md#drift"
+
+      - alert: ChurnNoPredictions
+        expr: sum(rate(churn_predictions_total[30m])) == 0
+        for: 30m
+        labels: { severity: ticket, team: ml-platform }
+        annotations:
+          summary: "No predictions for 30 minutes — upstream caller broken?"
+          runbook: "docs/OPERATIONS.md#no-traffic"
+
+      - alert: ChurnRetrainJobFailed
+        expr: sum(kube_job_status_failed{job_name=~"churn-retrain.*"}) > 0
+        for: 5m
+        labels: { severity: ticket, team: data-science }
+        annotations:
+          summary: "Scheduled retraining failed (gate failure or crash)"
+          runbook: "docs/OPERATIONS.md#retraining-failed"

@@ -1,0 +1,47 @@
+# Keyless login to AWS or GCP from GitHub Actions (OIDC), plus registry login
+# and kubeconfig. Everything is read from GitHub *environment* variables,
+# so the same workflow deploys to any cloud/environment.
+name: cloud-auth
+description: Authenticate to the environment's cloud, container registry and cluster
+inputs:
+  cloud: { description: "aws | gcp", required: true }
+  aws-region: { required: false, default: "" }
+  aws-role-arn: { required: false, default: "" }
+  eks-cluster: { required: false, default: "" }
+  gcp-wif-provider: { required: false, default: "" }
+  gcp-service-account: { required: false, default: "" }
+  gcp-region: { required: false, default: "" }
+  gke-cluster: { required: false, default: "" }
+  gcp-project: { required: false, default: "" }
+runs:
+  using: composite
+  steps:
+    # ------------------------------------------------------------- AWS ---
+    - if: inputs.cloud == 'aws'
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ inputs.aws-role-arn }}
+        aws-region: ${{ inputs.aws-region }}
+    - if: inputs.cloud == 'aws'
+      uses: aws-actions/amazon-ecr-login@v2
+    - if: inputs.cloud == 'aws'
+      shell: bash
+      run: aws eks update-kubeconfig --name "${{ inputs.eks-cluster }}" --region "${{ inputs.aws-region }}"
+
+    # ------------------------------------------------------------- GCP ---
+    - if: inputs.cloud == 'gcp'
+      uses: google-github-actions/auth@v2
+      with:
+        workload_identity_provider: ${{ inputs.gcp-wif-provider }}
+        service_account: ${{ inputs.gcp-service-account }}
+    - if: inputs.cloud == 'gcp'
+      uses: google-github-actions/setup-gcloud@v2
+    - if: inputs.cloud == 'gcp'
+      shell: bash
+      run: gcloud auth configure-docker "${{ inputs.gcp-region }}-docker.pkg.dev" --quiet
+    - if: inputs.cloud == 'gcp'
+      uses: google-github-actions/get-gke-credentials@v2
+      with:
+        cluster_name: ${{ inputs.gke-cluster }}
+        location: ${{ inputs.gcp-region }}
+        project_id: ${{ inputs.gcp-project }}

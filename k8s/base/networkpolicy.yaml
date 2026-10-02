@@ -1,0 +1,65 @@
+# Zero-trust networking inside the cluster: deny everything, then allow
+# exactly what's needed. (Requires a CNI that enforces NetworkPolicy:
+# VPC CNI with network policy enabled on EKS; Dataplane V2 on GKE.)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: churn-api
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: churn-api
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:   # the gateway (Envoy) proxies public traffic
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: gateway-system }
+      ports: [{ port: 8000 }]
+    - from:   # Prometheus scrapes /metrics
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: monitoring }
+      ports: [{ port: 8000 }]
+  egress:
+    - to:     # DNS
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+    - to:     # OpenTelemetry collector
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+      ports: [{ port: 4318 }]
+    - ports:  # HTTPS to object storage + cloud identity endpoints (S3/GCS, STS)
+        - { port: 443 }
+    - to:     # AWS EKS Pod Identity agent / GKE metadata server (link-local)
+        - ipBlock: { cidr: 169.254.0.0/16 }
+      ports: [{ port: 80 }, { port: 988 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: churn-jobs
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: job
+  policyTypes: ["Ingress", "Egress"]
+  ingress: []                       # jobs accept no connections
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+    - ports: [{ port: 443 }]
+    - to:
+        - ipBlock: { cidr: 169.254.0.0/16 }
+      ports: [{ port: 80 }, { port: 988 }]

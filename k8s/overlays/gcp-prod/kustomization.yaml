@@ -1,0 +1,33 @@
+# gcp-prod
+# Cloud: GCP (GKE, Artifact Registry, GCS). Identity: Workload Identity Federation (infra/gcp/iam.tf).
+# Everything cloud-specific in the app layer is in this file: bucket URIs,
+# hostname and (via ./release) the image registry. The rest is shared.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: churn-prod
+
+resources:
+  - namespace.yaml
+  - ../../base
+
+components:
+  - ../../components/canary
+  - ../../components/prod
+  - ./release
+
+configMapGenerator:
+  - name: churn-config
+    behavior: merge
+    literals:
+      - CHURN_ENV=prod
+      - CHURN_MODEL_REGISTRY=gs://acme-churn-prod-models/registry
+      - CHURN_DATA_PATH=gs://acme-churn-prod-data/customers.csv
+      - CHURN_SCORES_PATH=gs://acme-churn-prod-data/scores/latest.csv
+
+patches:
+  - target: { kind: HTTPRoute, name: churn-api }
+    patch: |-
+      - op: replace
+        path: /spec/hostnames
+        value: ["churn.example.com"]

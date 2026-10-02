@@ -1,0 +1,52 @@
+# Infrastructure changes go through the same review as code:
+#   PR    -> `terraform plan` for each environment, posted to the run summary
+#   main  -> `terraform apply` (production waits for approval)
+#
+# Uses a separate, more privileged role/service account than app deploys
+# (TF_ROLE_ARN / TF_SERVICE_ACCOUNT environment variables).
+name: infra
+
+on:
+  pull_request:
+    paths: ["infra/**"]
+  push:
+    branches: [main]
+    paths: ["infra/**"]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  terraform:
+    strategy:
+      fail-fast: false
+      max-parallel: 1              # staging before prod
+      matrix:
+        env: [staging, prod]
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'push' && format('infra-{0}', matrix.env) || format('infra-{0}-plan', matrix.env) }}
+    defaults:
+      run:
+        working-directory: infra/${{ vars.CLOUD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - if: vars.CLOUD == 'aws'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.TF_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - if: vars.CLOUD == 'gcp'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.TF_SERVICE_ACCOUNT }}
+      - run: terraform init -input=false -backend-config=envs/${{ matrix.env }}.backend.hcl
+      - name: Plan
+        run: |
+          terraform plan -input=false -var-file=envs/${{ matrix.env }}.tfvars -out=tfplan -no-color | tee plan.txt
+          { echo "### Terraform plan — ${{ matrix.env }}"; echo '```'; tail -60 plan.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Apply (main only)
+        if: github.event_name == 'push'
+        run: terraform apply -input=false tfplan

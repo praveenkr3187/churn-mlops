@@ -1,0 +1,85 @@
+# Local Kubernetes (kind) — the full app layer on a laptop, no cloud account.
+#   make kind-up      # create cluster, build + load images, apply, bootstrap a model
+#   make kind-smoke   # port-forward + smoke test
+#   make kind-down
+#
+# Differences from cloud overlays (kept deliberately small):
+#   * MinIO in the namespace stands in for S3/GCS
+#   * a plain Secret replaces ExternalSecret (no External Secrets Operator)
+#   * Gateway / rate-limit / Prometheus Operator objects are removed (no CRDs);
+#     you reach the API with `kubectl port-forward`
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: churn-local
+
+resources:
+  - namespace.yaml
+  - ../../base
+  - minio.yaml
+  - bootstrap-job.yaml
+
+components:
+  - ./release
+
+configMapGenerator:
+  - name: churn-config
+    behavior: merge
+    literals:
+      - CHURN_ENV=dev
+      - CHURN_MODEL_REGISTRY=s3://churn-models/registry
+      - CHURN_DATA_PATH=s3://churn-data/customers.csv
+      - CHURN_SCORES_PATH=s3://churn-data/scores/latest.csv
+      - AWS_ENDPOINT_URL=http://minio:9000
+      - AWS_DEFAULT_REGION=us-east-1
+      - OTEL_EXPORTER_OTLP_ENDPOINT=
+
+secretGenerator:
+  - name: churn-api-secrets
+    options: { disableNameSuffixHash: true }
+    literals:
+      - CHURN_API_KEYS=dev-key
+      - CHURN_ADMIN_API_KEYS=dev-admin-key
+      - CHURN_PII_SALT=local-salt
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+
+patches:
+  # Remove objects whose CRDs aren't installed on a bare kind cluster.
+  - patch: |-
+      $patch: delete
+      apiVersion: external-secrets.io/v1
+      kind: ExternalSecret
+      metadata: { name: churn-api-secrets }
+  - patch: |-
+      $patch: delete
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: HTTPRoute
+      metadata: { name: churn-api }
+  - patch: |-
+      $patch: delete
+      apiVersion: gateway.envoyproxy.io/v1alpha1
+      kind: BackendTrafficPolicy
+      metadata: { name: churn-api }
+  - patch: |-
+      $patch: delete
+      apiVersion: monitoring.coreos.com/v1
+      kind: PodMonitor
+      metadata: { name: churn-api }
+  - patch: |-
+      $patch: delete
+      apiVersion: monitoring.coreos.com/v1
+      kind: PrometheusRule
+      metadata: { name: churn-api }
+  # Jobs need the MinIO credentials too (in the cloud, identity replaces them).
+  - target: { kind: CronJob }
+    patch: |-
+      - op: add
+        path: /spec/jobTemplate/spec/template/spec/containers/0/envFrom/-
+        value: { secretRef: { name: churn-api-secrets } }
+  # Images are loaded into kind, never pulled.
+  - target: { kind: Deployment, name: churn-api }
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never

@@ -1,0 +1,15 @@
+# Checkov policy for rendered Kubernetes manifests. Each skip is a deliberate,
+# documented trade-off, not a silenced warning (see docs/SECURITY.md).
+skip-check:
+  # CPU limits cause CFS throttling and latency spikes for Python services;
+  # we set CPU *requests* (scheduling + HPA) and memory limits instead.
+  - CKV_K8S_11
+  # Tags are immutable in ECR / Artifact Registry and images are cosign-signed,
+  # so a tag can't be repointed. Next step: have release.py write digests too.
+  - CKV_K8S_43
+  # With immutable tags, IfNotPresent is safe and avoids registry dependency
+  # on every pod start.
+  - CKV_K8S_15
+  # 12-factor apps read config from env. Secrets as env vars are visible to
+  # anyone who can exec into the pod; mitigated by RBAC. Files are stricter.
+  - CKV_K8S_35

@@ -1,0 +1,54 @@
+# One-off: create buckets, upload data, train, promote. In the cloud this is
+# Terraform (buckets) + the retrain CronJob + the approval workflow.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: churn-bootstrap
+  labels:
+    app.kubernetes.io/name: churn-bootstrap
+    app.kubernetes.io/component: job
+spec:
+  backoffLimit: 6                  # retries while MinIO starts
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: churn-bootstrap
+        app.kubernetes.io/component: job
+    spec:
+      serviceAccountName: churn-trainer
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: bootstrap
+          # Fully-qualified on purpose: scripts/release.py retags every `churn-train`
+          # image on each release, but a Job's pod template is immutable, so
+          # re-applying the overlay would fail. This one-off job keeps the image
+          # it was created with (same image kind loads as `churn-train:dev`).
+          image: docker.io/library/churn-train:dev
+          imagePullPolicy: Never
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              (cd scripts && python bootstrap_storage.py --rows 10000)
+              python -m churn.train --alias staging
+              python -m churn.promote --from-alias staging --alias production --reason "kind bootstrap"
+          envFrom:
+            - configMapRef: { name: churn-config }
+            - secretRef: { name: churn-api-secrets }
+          resources:
+            requests: { cpu: 500m, memory: 1Gi }
+            limits: { memory: 2Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}

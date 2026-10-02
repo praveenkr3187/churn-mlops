@@ -1,0 +1,23 @@
+# Canary track: a second Deployment + Service. The HTTPRoute sends a
+# percentage of traffic to it. When no release is in progress the canary
+# runs the same version as stable with weight 0.
+#
+# Driven by scripts/release.py:
+#   canary-start  -> canary gets new image/model, weight 10
+#   (canary analysis compares canary vs stable error rate + latency)
+#   canary-promote -> stable gets new image/model, canary weight 0
+#   canary-abort   -> canary weight 0, reset to stable
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - deployment.yaml
+  - service.yaml
+
+configMapGenerator:
+  - name: churn-canary-release
+    literals:
+      - CHURN_MODEL_VERSION=production
+
+# Traffic weights live in each overlay (canary-weights.yaml), because every
+# environment runs its own release independently.

@@ -1,0 +1,7 @@
+# GCP platform layer: kubectl apply -k k8s/platform/gcp
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../common
+  - envoyproxy.yaml
+  - secretstore.yaml

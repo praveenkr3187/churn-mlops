@@ -1,0 +1,85 @@
+# S3-compatible object storage for local clusters. Not for production.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  labels: { app.kubernetes.io/name: minio }
+  annotations:
+    checkov.io/skip1: CKV_K8S_22=MinIO writes config under its home dir; local-only component
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: minio }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: minio }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: minio
+          image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z   # community fork; minio/minio images are gone
+          args: ["server", "/data", "--console-address", ":9001"]
+          env:
+            - { name: MINIO_ROOT_USER, value: minioadmin }
+            - { name: MINIO_ROOT_PASSWORD, value: minioadmin }
+          ports:
+            - { name: s3, containerPort: 9000 }
+            - { name: console, containerPort: 9001 }
+          readinessProbe:
+            httpGet: { path: /minio/health/ready, port: s3 }
+          livenessProbe:
+            httpGet: { path: /minio/health/live, port: s3 }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+spec:
+  selector: { app.kubernetes.io/name: minio }
+  ports:
+    - { name: s3, port: 9000, targetPort: s3 }
+    - { name: console, port: 9001, targetPort: console }
+---
+# Let the API and jobs reach MinIO on 9000 (base policies only allow 443).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-minio
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: minio }
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector: {}
+      ports: [{ port: 9000 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: egress-to-minio
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: minio }
+      ports: [{ port: 9000 }]

@@ -1,0 +1,11 @@
+# Node upgrades / drains may evict at most one API pod at a time.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: churn-api
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: churn-api
+      track: stable

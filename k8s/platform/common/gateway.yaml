@@ -1,0 +1,88 @@
+# Platform layer: installed ONCE per cluster by the platform team (or you,
+# wearing that hat). Apps attach HTTPRoutes to this Gateway.
+#
+# Prereqs (infra/bootstrap/install-addons.sh): Gateway API CRDs, Envoy Gateway,
+# cert-manager (with Gateway API support enabled).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gateway-system
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: envoy
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef:            # cloud-specific load balancer settings (aws/ or gcp/)
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: cloud-lb
+    namespace: gateway-system
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: public
+  namespace: gateway-system
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt   # issues the TLS cert automatically
+spec:
+  gatewayClassName: envoy
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces: { from: Same }       # only the redirect below
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: "*.example.com"
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: public-tls
+      allowedRoutes:
+        namespaces:
+          from: Selector                 # only namespaces opted in may attach routes
+          selector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: ["churn-staging", "churn-prod"]
+---
+# Plain HTTP -> HTTPS
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: https-redirect
+  namespace: gateway-system
+spec:
+  parentRefs:
+    - name: public
+      sectionName: http
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: platform-team@example.com
+    privateKeySecretRef:
+      name: letsencrypt-account
+    solvers:
+      - http01:
+          gatewayHTTPRoute:
+            parentRefs:
+              - name: public
+                namespace: gateway-system
+                kind: Gateway

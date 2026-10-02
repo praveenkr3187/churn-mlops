@@ -1,0 +1,21 @@
+# Record what is now running by committing the overlay's release state back
+# to main. Git history == deployment history (and `git revert` == rollback).
+# Next step up: let Argo CD / Flux apply from Git instead of kubectl in CI.
+name: commit-release
+description: Commit updated release state to Git
+inputs:
+  message: { required: true }
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        MSG: ${{ inputs.message }}
+      run: |
+        git config user.name "release-bot"
+        git config user.email "release-bot@users.noreply.github.com"
+        git add k8s/overlays/*/release/
+        if git diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
+        git commit -m "$MSG [skip ci]"
+        for _ in 1 2 3; do git pull --rebase && git push && exit 0; sleep 5; done
+        exit 1

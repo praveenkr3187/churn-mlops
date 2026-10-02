@@ -1,0 +1,37 @@
+# kube-prometheus-stack values (trimmed to what this project needs).
+prometheus:
+  prometheusSpec:
+    retention: 15d
+    # Pick up PodMonitors / PrometheusRules from every namespace that carries
+    # the `release: kube-prometheus-stack` label (ours do).
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    # For long-term storage, remote-write to Amazon Managed Prometheus or
+    # Google Managed Prometheus instead of growing local disks:
+    # remoteWrite:
+    #   - url: https://aps-workspaces.<region>.amazonaws.com/workspaces/<id>/api/v1/remote_write
+    #     sigv4: { region: <region> }
+
+alertmanager:
+  config:
+    route:
+      receiver: default
+      group_by: [alertname, severity]
+      routes:
+        - matchers: ['severity="page"']
+          receiver: oncall-pager
+        - matchers: ['severity="ticket"']
+          receiver: team-channel
+    receivers:
+      - name: default
+      # Wire these to PagerDuty / Opsgenie / Slack / email. Keep the keys in
+      # a Secret, not here.
+      - name: oncall-pager
+      - name: team-channel
+
+grafana:
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard     # loads the churn dashboard ConfigMap
+      searchNamespace: ALL

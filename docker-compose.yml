@@ -1,0 +1,103 @@
+# Local "production-like" stack. Same images, same env vars as the cloud;
+# MinIO stands in for S3/GCS, Prometheus + Grafana for the managed versions.
+#
+#   make up        # build + start everything, train a first model
+#   open http://localhost:8000/docs   (API, key: dev-key)
+#   open http://localhost:9001        (MinIO console: minioadmin / minioadmin)
+#   open http://localhost:5001        (MLflow: every training run, incl. failed ones)
+#   open http://localhost:9090        (Prometheus)
+#   open http://localhost:3000        (Grafana: admin / admin)
+#   make down
+
+x-s3-env: &s3-env
+  AWS_ENDPOINT_URL: http://minio:9000
+  AWS_ACCESS_KEY_ID: minioadmin
+  AWS_SECRET_ACCESS_KEY: minioadmin
+  AWS_DEFAULT_REGION: us-east-1
+  CHURN_MODEL_REGISTRY: s3://churn-models/registry
+  CHURN_DATA_PATH: s3://churn-data/customers.csv
+
+services:
+  # Community fork: MinIO stopped publishing images (minio/minio is gone from
+  # Docker Hub). Drop-in compatible, keeps the web console.
+  minio:
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+    command: server /data --console-address ":9001"
+    ports: ["9000:9000", "9001:9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      retries: 10
+
+  # One-shot: create buckets and upload training data.
+  seed:
+    build: { context: ., target: train }
+    depends_on: { minio: { condition: service_healthy } }
+    environment: *s3-env
+    working_dir: /app/scripts
+    entrypoint: ["python", "bootstrap_storage.py", "--rows", "10000"]
+
+  # Experiment tracking. Port 5001 on the host: macOS uses 5000 for AirPlay.
+  # Artifacts (run reports, model cards) are proxied through the server, so
+  # clients need no storage credentials.
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.22.1
+    command: >-
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --artifacts-destination /mlflow/artifacts
+    ports: ["5001:5000"]
+    volumes: [mlflow-data:/mlflow]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=2)"]
+      interval: 5s
+      retries: 20
+
+  # One-shot: train, then promote to production (locally there's no approver).
+  trainer:
+    build: { context: ., target: train }
+    depends_on:
+      seed: { condition: service_completed_successfully }
+      mlflow: { condition: service_healthy }
+    environment:
+      <<: *s3-env
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    entrypoint: ["sh", "-c"]
+    command:
+      - python -m churn.train --alias staging && python -m churn.promote --from-alias staging --alias production --reason "local compose"
+
+  api:
+    build: { context: ., target: serve }
+    depends_on: { trainer: { condition: service_completed_successfully } }
+    ports: ["8000:8000"]
+    environment:
+      <<: *s3-env
+      CHURN_ENV: dev
+      CHURN_API_KEYS: dev-key
+      CHURN_ADMIN_API_KEYS: dev-admin-key
+      CHURN_PII_SALT: local-compose-salt
+      CHURN_MODEL_VERSION: production
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports: ["9090:9090"]
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    ports: ["3000:3000"]
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+volumes:
+  mlflow-data:

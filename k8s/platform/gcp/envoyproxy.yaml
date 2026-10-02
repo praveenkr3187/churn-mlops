@@ -1,0 +1,17 @@
+# On GKE a Service of type LoadBalancer gets a regional external passthrough
+# Network Load Balancer by default. Reserve a static IP in Terraform and pin it.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: cloud-lb
+  namespace: gateway-system
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyDeployment:
+        replicas: 2
+      envoyService:
+        type: LoadBalancer
+        externalTrafficPolicy: Local
+        loadBalancerIP: 203.0.113.10         # google_compute_address.gateway (infra/gcp/network.tf)

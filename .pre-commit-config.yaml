@@ -1,0 +1,35 @@
+# Shift-left: run the cheapest CI checks on your laptop BEFORE you push.
+#   pip install pre-commit && pre-commit install     # once per clone
+#   pre-commit run --all-files                       # run on everything
+# CI still runs the full suite (.github/workflows/ci.yml); this just gives
+# feedback in seconds instead of minutes.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+        exclude: ^k8s/overlays/.*/release/     # machine-managed
+      - id: check-added-large-files            # no datasets / models in Git
+        args: [--maxkb=500]
+        exclude: ^requirements\.lock$
+      - id: detect-private-key
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        files: ^(src|tests|scripts)/|^locustfile\.py$
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks                           # API keys, cloud credentials
+  - repo: local
+    hooks:
+      - id: alerts-in-sync
+        name: alert rules in sync with PrometheusRule
+        entry: python scripts/sync_alerts.py --check
+        language: system
+        pass_filenames: false
+        files: ^(monitoring/alerts\.yml|k8s/base/prometheusrule\.yaml)$

@@ -1,0 +1,160 @@
+# Code release: build ONCE, then promote the identical artifact
+# staging -> (human approval) -> production canary -> production.
+#
+# Setup (once): create GitHub environments `staging` and `prod` (prod with
+# required reviewers) — names must match the cloud trust policies in infra/.
+# Each environment gets these variables:
+#   CLOUD                         aws | gcp
+#   IMAGE_REGISTRY                e.g. 1234.dkr.ecr.ap-south-1.amazonaws.com
+#                                  or asia-south1-docker.pkg.dev/acme-churn-prod/churn
+#   OVERLAY                       aws-staging | aws-prod | gcp-staging | gcp-prod
+#   AWS_REGION, AWS_DEPLOY_ROLE_ARN, EKS_CLUSTER                  (AWS)
+#   GCP_PROJECT, GCP_REGION, GCP_WORKLOAD_IDENTITY_PROVIDER,
+#   GCP_DEPLOY_SERVICE_ACCOUNT, GKE_CLUSTER                        (GCP)
+# and secret SMOKE_API_KEY. All values come from `terraform output`.
+name: release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["docs/**", "**.md", "infra/**", "k8s/overlays/*/release/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release            # one release at a time; never cancel a deploy midway
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: meta
+        run: echo "tag=$(date -u +%Y%m%d)-${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - name: Build both images as OCI archives (pushed later, byte-identical, per env)
+        run: |
+          for t in serve train; do
+            docker buildx build --target $t --provenance=mode=max --sbom=true \
+              --output type=oci,dest=image-$t.tar .
+          done
+      - uses: imjasonh/setup-crane@v0.4
+      - name: Trivy scan (fail on fixable HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          input: image-serve.tar
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: SBOM (SPDX) for the audit trail
+        uses: anchore/sbom-action@v0
+        with:
+          file: image-serve.tar
+          format: spdx-json
+          output-file: sbom-serve.spdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: images
+          path: |
+            image-*.tar
+            sbom-*.json
+          retention-days: 7
+
+  deploy-staging:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      contents: write        # commit the release state back to Git
+      id-token: write        # OIDC -> cloud credentials
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/cloud-auth
+        with:
+          cloud: ${{ vars.CLOUD }}
+          aws-region: ${{ vars.AWS_REGION }}
+          aws-role-arn: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          eks-cluster: ${{ vars.EKS_CLUSTER }}
+          gcp-wif-provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          gcp-service-account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          gcp-region: ${{ vars.GCP_REGION }}
+          gke-cluster: ${{ vars.GKE_CLUSTER }}
+          gcp-project: ${{ vars.GCP_PROJECT }}
+      - uses: ./.github/actions/push-images
+        with:
+          registry: ${{ vars.IMAGE_REGISTRY }}
+          tag: ${{ needs.build.outputs.tag }}
+      - uses: ./.github/actions/k8s-tools
+      - name: Deploy (rolling update, same model version)
+        env:
+          SMOKE_API_KEY: ${{ secrets.SMOKE_API_KEY }}
+        run: |
+          python scripts/release.py set-stable --overlay "${{ vars.OVERLAY }}" --tag "${{ needs.build.outputs.tag }}"
+          scripts/deploy.sh "${{ vars.OVERLAY }}"
+      - uses: ./.github/actions/commit-release
+        with:
+          message: "release(${{ vars.OVERLAY }}): ${{ needs.build.outputs.tag }}"
+
+  deploy-production:
+    needs: [build, deploy-staging]
+    runs-on: ubuntu-latest
+    environment: prod        # <- required reviewers approve here
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      TAG: ${{ needs.build.outputs.tag }}
+      SMOKE_API_KEY: ${{ secrets.SMOKE_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main }
+      - uses: ./.github/actions/cloud-auth
+        with:
+          cloud: ${{ vars.CLOUD }}
+          aws-region: ${{ vars.AWS_REGION }}
+          aws-role-arn: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          eks-cluster: ${{ vars.EKS_CLUSTER }}
+          gcp-wif-provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          gcp-service-account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          gcp-region: ${{ vars.GCP_REGION }}
+          gke-cluster: ${{ vars.GKE_CLUSTER }}
+          gcp-project: ${{ vars.GCP_PROJECT }}
+      - uses: ./.github/actions/push-images
+        with:
+          registry: ${{ vars.IMAGE_REGISTRY }}
+          tag: ${{ needs.build.outputs.tag }}
+      - uses: ./.github/actions/k8s-tools
+
+      - name: Canary 10%
+        run: |
+          python scripts/release.py canary-start --overlay "${{ vars.OVERLAY }}" --tag "$TAG" --weight 10
+          scripts/deploy.sh "${{ vars.OVERLAY }}"
+      - uses: ./.github/actions/canary-gate
+        with: { overlay: "${{ vars.OVERLAY }}", minutes: "10" }
+
+      - name: Canary 50%
+        run: |
+          python scripts/release.py canary-weight --overlay "${{ vars.OVERLAY }}" --weight 50
+          scripts/deploy.sh "${{ vars.OVERLAY }}" --no-smoke
+      - uses: ./.github/actions/canary-gate
+        with: { overlay: "${{ vars.OVERLAY }}", minutes: "10" }
+
+      - name: Promote canary -> stable (100%)
+        run: |
+          python scripts/release.py canary-promote --overlay "${{ vars.OVERLAY }}"
+          scripts/deploy.sh "${{ vars.OVERLAY }}"
+
+      - name: Roll back canary on any failure
+        if: failure()
+        run: |
+          python scripts/release.py canary-abort --overlay "${{ vars.OVERLAY }}"
+          scripts/deploy.sh "${{ vars.OVERLAY }}" --no-smoke
+      - uses: ./.github/actions/commit-release
+        if: always()
+        with:
+          message: "release(${{ vars.OVERLAY }}): ${{ job.status == 'success' && 'promoted' || 'rolled back' }} ${{ needs.build.outputs.tag }}"
