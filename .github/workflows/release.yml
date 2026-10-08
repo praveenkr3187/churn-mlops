@@ -33,19 +33,19 @@ jobs:
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: meta
         run: echo "tag=$(date -u +%Y%m%d)-${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Build both images as OCI archives (pushed later, byte-identical, per env)
         run: |
           for t in serve train; do
             docker buildx build --target $t --provenance=mode=max --sbom=true \
               --output type=oci,dest=image-$t.tar .
           done
-      - uses: imjasonh/setup-crane@v0.4
+      - uses: imjasonh/setup-crane@v0.7
       - name: Trivy scan (fail on fixable HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@v0.35.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           input: image-serve.tar
           severity: HIGH,CRITICAL
@@ -57,7 +57,7 @@ jobs:
           file: image-serve.tar
           format: spdx-json
           output-file: sbom-serve.spdx.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: images
           path: |
@@ -73,7 +73,7 @@ jobs:
       contents: write        # commit the release state back to Git
       id-token: write        # OIDC -> cloud credentials
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/cloud-auth
         with:
           cloud: ${{ vars.CLOUD }}
@@ -111,7 +111,7 @@ jobs:
       TAG: ${{ needs.build.outputs.tag }}
       SMOKE_API_KEY: ${{ secrets.SMOKE_API_KEY }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { ref: main }
       - uses: ./.github/actions/cloud-auth
         with:

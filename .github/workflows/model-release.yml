@@ -33,7 +33,7 @@ jobs:
     outputs:
       version: ${{ steps.resolve.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/cloud-auth
         with:
           cloud: ${{ vars.CLOUD }}
@@ -45,7 +45,7 @@ jobs:
           gcp-region: ${{ vars.GCP_REGION }}
           gke-cluster: ${{ vars.GKE_CLUSTER }}
           gcp-project: ${{ vars.GCP_PROJECT }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with: { python-version: "3.11", cache: pip }
       - run: pip install --require-hashes --no-deps -r requirements.lock && pip install --no-deps .
       - id: resolve
@@ -86,7 +86,7 @@ jobs:
       SMOKE_API_KEY: ${{ secrets.SMOKE_API_KEY }}
       CHURN_MODEL_REGISTRY: ${{ vars.MODEL_REGISTRY_URI }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { ref: main }
       - uses: ./.github/actions/cloud-auth
         with:
